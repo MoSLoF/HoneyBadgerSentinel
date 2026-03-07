@@ -55,23 +55,23 @@ honeybadger-sentinel/
 
 ## 🚀 Quick Start
 
-### 1. Install Collector (iHBV-AI: 192.168.36.241)
+### 1. Install Collector (Collector: <COLLECTOR_IP>)
 
 ```bash
-ssh honeybadger@192.168.36.241
+ssh <user>@<COLLECTOR_IP>
 sudo ./install-collector.sh
 ```
 
-Dashboard: http://192.168.36.241:8443
+Dashboard: http://<COLLECTOR_IP>:8443
 
-### 2. Install Linux Agent (NAS: 192.168.36.243)
+### 2. Install Linux Agent (NAS: <NAS_IP>)
 
 ```bash
-ssh honeybadger@192.168.36.243
+ssh <user>@<NAS_IP>
 sudo ./install-agent-linux.sh
 ```
 
-### 3. Install Windows Agent (iHBV-TUF)
+### 3. Install Windows Agent (Windows Workstation)
 
 ```powershell
 .\Sentinel-Agent-Windows.ps1 -Install
@@ -81,7 +81,7 @@ Start-ScheduledTask -TaskName "HoneyBadger-Sentinel"
 ### 4. Verify
 
 ```bash
-curl http://192.168.36.241:8443/api/stats | jq
+curl http://<COLLECTOR_IP>:8443/api/stats | jq
 ```
 
 ---
@@ -90,7 +90,7 @@ curl http://192.168.36.241:8443/api/stats | jq
 
 ```
 ┌──────────────────────────────────────────────┐
-│  Central Collector (iHBV-AI R720)            │
+│  Central Collector (Collector Server)            │
 │  • FastAPI HTTP Server (Port 8443)           │
 │  • SQLite Time-Series Database               │
 │  • Alert Engine                              │
@@ -103,7 +103,7 @@ curl http://192.168.36.241:8443/api/stats | jq
     │         │         │         │
   ┌─▼─┐     ┌─▼─┐     ┌─▼─┐     ┌─▼─┐
   │NAS│     │TUF│     │OPi│     │G16│
-  │.243│    │.1  │    │.242│    │.240│
+  │    │    │    │    │    │    │    │
   └───┘     └───┘     └───┘     └───┘
   Linux     Windows   Linux     Windows
 ```
@@ -125,7 +125,7 @@ All configuration is via environment variables. Set them in:
 | `HBV_API_KEY` | (generated) | API authentication key |
 | `HBV_API_KEY_REQUIRED` | false | Enable authentication |
 | `HBV_BEACON_INTERVAL` | 30 | Agent beacon interval (seconds) |
-| `HBV_COLLECTOR_URL` | http://192.168.36.241:8443/api/beacon | Collector endpoint |
+| `HBV_COLLECTOR_URL` | http://<COLLECTOR_IP>:8443/api/beacon | Collector endpoint |
 | `HBV_RETENTION_DAYS` | 30 | Data retention period |
 | `HBV_LOG_LEVEL` | INFO | Logging level |
 
@@ -197,7 +197,7 @@ GET  /health              # Health check
 GET  /metrics             # Prometheus metrics
 ```
 
-**API Docs:** http://192.168.36.241:8443/docs
+**API Docs:** http://<COLLECTOR_IP>:8443/docs
 
 ### Prometheus Integration
 
@@ -206,7 +206,7 @@ Add to your `prometheus.yml`:
 scrape_configs:
   - job_name: 'hbv-sentinel'
     static_configs:
-      - targets: ['192.168.36.241:8443']
+      - targets: ['<COLLECTOR_IP>:8443']
     metrics_path: '/metrics'
 ```
 
@@ -306,7 +306,7 @@ HBV_RATE_LIMIT_WINDOW=60
 
 Restrict allowed origins (comma-separated):
 ```bash
-HBV_ALLOWED_ORIGINS=http://192.168.36.241:8443,http://localhost:8443
+HBV_ALLOWED_ORIGINS=http://<COLLECTOR_IP>:8443,http://localhost:8443
 ```
 
 ### Additional Hardening (Optional)
@@ -363,10 +363,10 @@ pytest tests/ -v
 
 | File | Purpose | Deploy To |
 |------|---------|-----------|
-| `sentinel-collector.py` | Central collector server | iHBV-AI (192.168.36.241) |
+| `sentinel-collector.py` | Central collector server | Collector (<COLLECTOR_IP>) |
 | `sentinel-agent-linux.py` | Linux monitoring agent | NAS, OrangePi, etc. |
-| `Sentinel-Agent-Windows.ps1` | Windows monitoring agent | iHBV-TUF, G16 |
-| `install-collector.sh` | Collector installation | iHBV-AI |
+| `Sentinel-Agent-Windows.ps1` | Windows monitoring agent | Windows Workstation, G16 |
+| `install-collector.sh` | Collector installation | Collector |
 | `install-agent-linux.sh` | Linux agent installation | Linux devices |
 | `DEPLOYMENT-GUIDE.md` | Complete setup guide | Reference |
 
@@ -380,10 +380,10 @@ pytest tests/ -v
 systemctl status hbv-sentinel-collector
 
 # Test endpoint
-curl http://192.168.36.241:8443/health
+curl http://<COLLECTOR_IP>:8443/health
 
 # Check network
-ping 192.168.36.241
+ping <COLLECTOR_IP>
 ```
 
 ### No Beacons Received
@@ -407,8 +407,8 @@ Get-Content $env:TEMP\HBV-Sentinel.log -Tail 50  # Windows
 ## 📖 Documentation
 
 - **Full Deployment Guide:** `DEPLOYMENT-GUIDE.md`
-- **API Documentation:** http://192.168.36.241:8443/docs
-- **Dashboard:** http://192.168.36.241:8443
+- **API Documentation:** http://<COLLECTOR_IP>:8443/docs
+- **Dashboard:** http://<COLLECTOR_IP>:8443
 
 ---
 

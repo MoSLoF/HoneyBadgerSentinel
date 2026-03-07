@@ -7,11 +7,11 @@
 ## ☑️ Pre-Installation Checklist
 
 ### Infrastructure Ready?
-- [ ] iHBV-AI R720 (192.168.36.241) - Online and accessible
-- [ ] iHBV-NAS-TT (192.168.36.243) - Online and accessible  
-- [ ] iHBV-TUF (Workstation) - Online and accessible
-- [ ] OrangePi 6P (192.168.36.242) - Online and accessible
-- [ ] G16 Laptop (192.168.36.240) - Online and accessible
+- [ ] Collector Server (<COLLECTOR_IP>) - Online and accessible
+- [ ] NAS (<NAS_IP>) - Online and accessible  
+- [ ] Windows Workstation (Workstation) - Online and accessible
+- [ ] OrangePi 6P (<AGENT_IP>) - Online and accessible
+- [ ] G16 Laptop (<AGENT_IP>) - Online and accessible
 - [ ] Network connectivity between all devices verified
 
 ### Files Ready?
@@ -24,14 +24,14 @@
 
 ### Step 1: Install Collector First ⭐ (5 minutes)
 
-**On iHBV-AI (192.168.36.241):**
+**On Collector (<COLLECTOR_IP>):**
 
 ```bash
 # Upload files
-scp sentinel-collector.py install-collector.sh honeybadger@192.168.36.241:~
+scp sentinel-collector.py install-collector.sh <user>@<COLLECTOR_IP>:~
 
-# SSH to iHBV-AI
-ssh honeybadger@192.168.36.241
+# SSH to Collector
+ssh <user>@<COLLECTOR_IP>
 
 # Install
 chmod +x install-collector.sh
@@ -50,20 +50,20 @@ curl http://localhost:8443/api/stats | jq
 }
 ```
 
-✅ **Checkpoint:** Dashboard accessible at http://192.168.36.241:8443
+✅ **Checkpoint:** Dashboard accessible at http://<COLLECTOR_IP>:8443
 
 ---
 
 ### Step 2: Install NAS Agent (3 minutes)
 
-**On iHBV-NAS-TT (192.168.36.243):**
+**On NAS (<NAS_IP>):**
 
 ```bash
 # Upload files
-scp sentinel-agent-linux.py install-agent-linux.sh honeybadger@192.168.36.243:~
+scp sentinel-agent-linux.py install-agent-linux.sh <user>@<NAS_IP>:~
 
 # SSH to NAS
-ssh honeybadger@192.168.36.243
+ssh <user>@<NAS_IP>
 
 # Install
 chmod +x install-agent-linux.sh
@@ -73,7 +73,7 @@ sudo ./install-agent-linux.sh
 **Wait 1 minute, then verify:**
 ```bash
 # From any machine
-curl http://192.168.36.241:8443/api/agents | jq
+curl http://<COLLECTOR_IP>:8443/api/agents | jq
 ```
 
 **Expected Result:**
@@ -81,7 +81,7 @@ curl http://192.168.36.241:8443/api/agents | jq
 {
   "agents": [
     {
-      "agent_id": "nas.ihbv.lab",
+      "agent_id": "nas-server",
       "status": "online",
       "total_beacons": 2
     }
@@ -95,14 +95,14 @@ curl http://192.168.36.241:8443/api/agents | jq
 
 ### Step 3: Install OrangePi Agent (3 minutes)
 
-**On OrangePi 6P (192.168.36.242):**
+**On OrangePi 6P (<AGENT_IP>):**
 
 ```bash
 # Upload files
-scp sentinel-agent-linux.py install-agent-linux.sh honeybadger@192.168.36.242:~
+scp sentinel-agent-linux.py install-agent-linux.sh <user>@<AGENT_IP>:~
 
 # SSH to OrangePi
-ssh honeybadger@192.168.36.242
+ssh <user>@<AGENT_IP>
 
 # Install
 chmod +x install-agent-linux.sh
@@ -115,7 +115,7 @@ sudo ./install-agent-linux.sh
 
 ### Step 4: Install Windows TUF Agent (3 minutes)
 
-**On iHBV-TUF (Local Workstation):**
+**On Windows Workstation (Local Workstation):**
 
 ```powershell
 # Copy file to C:\HBV\
@@ -149,7 +149,7 @@ Get-Content "$env:TEMP\HBV-Sentinel.log" -Tail 20
 
 ### Step 5: Install Windows G16 Agent (Optional) (3 minutes)
 
-**On G16 Laptop (192.168.36.240):**
+**On G16 Laptop (<AGENT_IP>):**
 
 Same process as Step 4.
 
@@ -162,28 +162,28 @@ Same process as Step 4.
 ### Check All Agents Online
 
 ```bash
-curl http://192.168.36.241:8443/api/agents | jq '.agents[] | {agent_id, status, total_beacons}'
+curl http://<COLLECTOR_IP>:8443/api/agents | jq '.agents[] | {agent_id, status, total_beacons}'
 ```
 
 **Expected Output:**
 ```json
-{"agent_id": "nas.ihbv.lab", "status": "online", "total_beacons": 120}
-{"agent_id": "opi6p.ihbv.lab", "status": "online", "total_beacons": 120}
-{"agent_id": "IHBV-TUF", "status": "online", "total_beacons": 120}
+{"agent_id": "nas-server", "status": "online", "total_beacons": 120}
+{"agent_id": "linux-agent-01", "status": "online", "total_beacons": 120}
+{"agent_id": "WIN-WORKSTATION", "status": "online", "total_beacons": 120}
 {"agent_id": "G16", "status": "online", "total_beacons": 120}
 ```
 
 ### Check Recent Beacon Activity
 
 ```bash
-curl http://192.168.36.241:8443/api/stats | jq '.beacons.last_hour'
+curl http://<COLLECTOR_IP>:8443/api/stats | jq '.beacons.last_hour'
 ```
 
 **Expected:** Should show number of beacons in last hour (agents * 120)
 
 ### Test Dashboard
 
-Open browser: http://192.168.36.241:8443
+Open browser: http://<COLLECTOR_IP>:8443
 
 **Should show:**
 - Agents online count
@@ -206,15 +206,15 @@ journalctl -u hbv-sentinel -f                    # Linux
 Get-Content $env:TEMP\HBV-Sentinel.log -Tail 50  # Windows
 
 # Test connectivity
-ping 192.168.36.241
-curl http://192.168.36.241:8443/health
+ping <COLLECTOR_IP>
+curl http://<COLLECTOR_IP>:8443/health
 ```
 
 ### No Beacons Received?
 
 ```bash
 # Check collector is running
-ssh honeybadger@192.168.36.241
+ssh <user>@<COLLECTOR_IP>
 systemctl status hbv-sentinel-collector
 journalctl -u hbv-sentinel-collector -f
 
@@ -242,20 +242,20 @@ Restart-ScheduledTask HoneyBadger-Sentinel       # Windows
 
 ```bash
 # 1. All agents online?
-curl http://192.168.36.241:8443/api/agents | jq '.agents[] | select(.status == "online") | .agent_id'
+curl http://<COLLECTOR_IP>:8443/api/agents | jq '.agents[] | select(.status == "online") | .agent_id'
 
 # 2. Recent beacon activity?
-curl http://192.168.36.241:8443/api/stats | jq '.beacons.last_hour'
+curl http://<COLLECTOR_IP>:8443/api/stats | jq '.beacons.last_hour'
 
 # 3. Any active alerts?
-curl http://192.168.36.241:8443/api/alerts | jq '.alerts | length'
+curl http://<COLLECTOR_IP>:8443/api/alerts | jq '.alerts | length'
 
 # 4. Database size reasonable?
-ssh honeybadger@192.168.36.241 "ls -lh /opt/hbv-sentinel/sentinel.db"
+ssh <user>@<COLLECTOR_IP> "ls -lh /opt/hbv-sentinel/sentinel.db"
 
 # 5. Services auto-start on boot?
-ssh honeybadger@192.168.36.241 "systemctl is-enabled hbv-sentinel-collector"
-ssh honeybadger@192.168.36.243 "systemctl is-enabled hbv-sentinel"
+ssh <user>@<COLLECTOR_IP> "systemctl is-enabled hbv-sentinel-collector"
+ssh <user>@<NAS_IP> "systemctl is-enabled hbv-sentinel"
 ```
 
 ---
@@ -284,7 +284,7 @@ ssh honeybadger@192.168.36.243 "systemctl is-enabled hbv-sentinel"
 **Total Installation Time:** ~20-30 minutes
 
 **System Status:**
-- ✅ Collector running on iHBV-AI
+- ✅ Collector running on Collector
 - ✅ Agents beaconing from all devices
 - ✅ Dashboard accessible
 - ✅ Alerts configured

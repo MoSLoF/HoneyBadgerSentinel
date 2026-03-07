@@ -1,7 +1,7 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════
 # HoneyBadger Sentinel - Collector Installation Script
-# Install on: iHBV-AI (192.168.36.241)
+# Install on: Collector server
 # Version: 1.1.0
 # ═══════════════════════════════════════════════════════════════════════
 

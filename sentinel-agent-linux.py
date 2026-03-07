@@ -48,7 +48,7 @@ CONFIG = {
     "agent_type": "linux",
 
     # Collector Configuration
-    "api_endpoint": get_env("HBV_COLLECTOR_URL", "http://192.168.36.241:8443/api/beacon"),
+    "api_endpoint": get_env("HBV_COLLECTOR_URL", "http://<COLLECTOR_IP>:8443/api/beacon"),
     "api_key": get_env("HBV_API_KEY", ""),
 
     # Beacon Settings
@@ -512,7 +512,7 @@ def install_service():
 # Uncomment and modify as needed
 
 # Collector URL
-# HBV_COLLECTOR_URL=http://192.168.36.241:8443/api/beacon
+# HBV_COLLECTOR_URL=http://<COLLECTOR_IP>:8443/api/beacon
 
 # API Key (if collector requires authentication)
 # HBV_API_KEY=your-api-key-here

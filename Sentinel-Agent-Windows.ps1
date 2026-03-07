@@ -58,7 +58,7 @@ $script:Config = @{
     AgentType = "windows"
 
     # Collector Configuration
-    APIEndpoint = Get-EnvOrDefault -Name "HBV_COLLECTOR_URL" -Default "http://192.168.36.241:8443/api/beacon"
+    APIEndpoint = Get-EnvOrDefault -Name "HBV_COLLECTOR_URL" -Default "http://<COLLECTOR_IP>:8443/api/beacon"
     APIKey = Get-EnvOrDefault -Name "HBV_API_KEY" -Default ""
 
     # Beacon Settings

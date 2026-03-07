@@ -565,7 +565,7 @@ async def lifespan(app: FastAPI):
         logger.info("API key authentication: ENABLED")
     else:
         logger.info("API key authentication: DISABLED (set HBV_API_KEY_REQUIRED=true to enable)")
-        logger.info(f"Generated API key for reference: {CONFIG['api_key']}")
+        logger.info("Generated API key for reference (set HBV_API_KEY env var to use a fixed key)")
 
     # Start background cleanup task
     cleanup = asyncio.create_task(cleanup_task())
@@ -835,8 +835,8 @@ POST /api/beacon             - Receive beacon (agent endpoint)
             <h2>Quick Start</h2>
             <pre>
 # Test the API
-curl http://192.168.36.241:8443/api/stats
-curl http://192.168.36.241:8443/api/agents
+curl http://localhost:8443/api/stats
+curl http://localhost:8443/api/agents
             </pre>
         </div>
         

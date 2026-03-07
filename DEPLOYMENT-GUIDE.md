@@ -10,7 +10,7 @@ HoneyBadger Sentinel is a distributed monitoring system with C2-style beacon arc
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  Central Collector (iHBV-AI: 192.168.36.241)    │
+│  Central Collector (Collector: <COLLECTOR_IP>)    │
 │  ├─ FastAPI HTTP Server (Port 8443)             │
 │  ├─ SQLite Time-Series Database                 │
 │  ├─ Alert Engine                                │
@@ -32,14 +32,14 @@ HoneyBadger Sentinel is a distributed monitoring system with C2-style beacon arc
 
 ## 🚀 Quick Start (5 Minutes)
 
-### Step 1: Install Collector (iHBV-AI R720)
+### Step 1: Install Collector (Collector R720)
 
 ```bash
-# SSH to iHBV-AI
-ssh honeybadger@192.168.36.241
+# SSH to Collector
+ssh <user>@<COLLECTOR_IP>
 
 # Upload files
-scp sentinel-collector.py install-collector.sh honeybadger@192.168.36.241:~
+scp sentinel-collector.py install-collector.sh <user>@<COLLECTOR_IP>:~
 
 # Install
 chmod +x install-collector.sh
@@ -50,10 +50,10 @@ sudo ./install-collector.sh
 
 ```bash
 # SSH to NAS
-ssh honeybadger@192.168.36.243
+ssh <user>@<NAS_IP>
 
 # Upload files
-scp sentinel-agent-linux.py install-agent-linux.sh honeybadger@192.168.36.243:~
+scp sentinel-agent-linux.py install-agent-linux.sh <user>@<NAS_IP>:~
 
 # Install
 chmod +x install-agent-linux.sh
@@ -63,7 +63,7 @@ sudo ./install-agent-linux.sh
 ### Step 3: Install Windows Agents (TUF, G16)
 
 ```powershell
-# On iHBV-TUF
+# On Windows Workstation
 Copy-Item Sentinel-Agent-Windows.ps1 C:\HBV\
 
 # Install as scheduled task
@@ -78,10 +78,10 @@ Start-ScheduledTask -TaskName "HoneyBadger-Sentinel"
 
 ```bash
 # Check collector stats
-curl http://192.168.36.241:8443/api/stats | jq
+curl http://<COLLECTOR_IP>:8443/api/stats | jq
 
 # Check active agents
-curl http://192.168.36.241:8443/api/agents | jq
+curl http://<COLLECTOR_IP>:8443/api/agents | jq
 ```
 
 ---
@@ -90,7 +90,7 @@ curl http://192.168.36.241:8443/api/agents | jq
 
 ### Prerequisites
 
-**Collector (iHBV-AI):**
+**Collector (Collector):**
 - Ubuntu/Debian Linux
 - Python 3.8+
 - pip3
@@ -139,7 +139,7 @@ Edit `/opt/hbv-sentinel/sentinel-agent-linux.py`:
 ```python
 CONFIG = {
     "agent_id": socket.gethostname(),
-    "api_endpoint": "http://192.168.36.241:8443/api/beacon",
+    "api_endpoint": "http://<COLLECTOR_IP>:8443/api/beacon",
     "beacon_interval": 30,    # Beacon every 30 seconds
     "max_retries": 3,
     "queue_path": "/tmp/hbv-sentinel-queue",
@@ -153,7 +153,7 @@ Edit `Sentinel-Agent-Windows.ps1`:
 ```powershell
 $script:Config = @{
     AgentID = $env:COMPUTERNAME
-    APIEndpoint = "http://192.168.36.241:8443/api/beacon"
+    APIEndpoint = "http://<COLLECTOR_IP>:8443/api/beacon"
     BeaconInterval = 30       # Beacon every 30 seconds
     MaxRetries = 3
     QueuePath = "$env:TEMP\HBV-Sentinel-Queue"
@@ -168,7 +168,7 @@ $script:Config = @{
 
 Open in browser:
 ```
-http://192.168.36.241:8443
+http://<COLLECTOR_IP>:8443
 ```
 
 Real-time view of:
@@ -180,26 +180,26 @@ Real-time view of:
 
 ```bash
 # Get statistics
-curl http://192.168.36.241:8443/api/stats
+curl http://<COLLECTOR_IP>:8443/api/stats
 
 # List all agents
-curl http://192.168.36.241:8443/api/agents
+curl http://<COLLECTOR_IP>:8443/api/agents
 
 # Get latest beacons
-curl http://192.168.36.241:8443/api/beacons/latest?limit=10
+curl http://<COLLECTOR_IP>:8443/api/beacons/latest?limit=10
 
 # Get agent-specific beacons
-curl http://192.168.36.241:8443/api/beacons/iHBV-TUF?limit=10
+curl http://<COLLECTOR_IP>:8443/api/beacons/Windows Workstation?limit=10
 
 # Get active alerts
-curl http://192.168.36.241:8443/api/alerts
+curl http://<COLLECTOR_IP>:8443/api/alerts
 ```
 
 ### API Documentation
 
 Interactive Swagger docs:
 ```
-http://192.168.36.241:8443/docs
+http://<COLLECTOR_IP>:8443/docs
 ```
 
 ---
@@ -261,10 +261,10 @@ Get-Content "$env:TEMP\HBV-Sentinel.log" -Tail 50
 
 ```bash
 # Get all unresolved alerts
-curl http://192.168.36.241:8443/api/alerts | jq
+curl http://<COLLECTOR_IP>:8443/api/alerts | jq
 
 # Filter by agent
-curl http://192.168.36.241:8443/api/alerts | jq '.alerts[] | select(.agent_id == "iHBV-NAS-TT")'
+curl http://<COLLECTOR_IP>:8443/api/alerts | jq '.alerts[] | select(.agent_id == "NAS")'
 ```
 
 ---
@@ -290,16 +290,16 @@ curl http://192.168.36.241:8443/api/alerts | jq '.alerts[] | select(.agent_id ==
 
 ```bash
 # 1. Verify all agents online
-curl http://192.168.36.241:8443/api/agents | jq '.agents[] | select(.status == "online")'
+curl http://<COLLECTOR_IP>:8443/api/agents | jq '.agents[] | select(.status == "online")'
 
 # 2. Check recent beacon activity
-curl http://192.168.36.241:8443/api/stats | jq '.beacons.last_hour'
+curl http://<COLLECTOR_IP>:8443/api/stats | jq '.beacons.last_hour'
 
 # 3. Clear old alerts
 # (Manual via database if needed)
 
 # 4. Test dashboard
-curl http://192.168.36.241:8443/health
+curl http://<COLLECTOR_IP>:8443/health
 ```
 
 ### Demo Talking Points
@@ -337,7 +337,7 @@ curl http://192.168.36.241:8443/health
 
 ```bash
 # Check network connectivity
-ping 192.168.36.241
+ping <COLLECTOR_IP>
 
 # Check collector is running
 systemctl status hbv-sentinel-collector
@@ -347,7 +347,7 @@ sudo ufw status
 sudo firewall-cmd --list-all
 
 # Test API endpoint
-curl http://192.168.36.241:8443/health
+curl http://<COLLECTOR_IP>:8443/health
 ```
 
 ### High Beacon Queue on Agent
@@ -439,7 +439,7 @@ sqlite3 /opt/hbv-sentinel/sentinel.db "VACUUM;"
 - Agent logs (Linux): `/var/log/hbv-sentinel.log`
 - Agent logs (Windows): `%TEMP%\HBV-Sentinel.log`
 - Database: `/opt/hbv-sentinel/sentinel.db`
-- API docs: `http://192.168.36.241:8443/docs`
+- API docs: `http://<COLLECTOR_IP>:8443/docs`
 
 ---
 

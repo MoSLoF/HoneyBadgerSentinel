@@ -1,7 +1,7 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════
 # HoneyBadger Sentinel - Linux Agent Installation Script
-# Install on: iHBV-NAS-TT, OrangePi 6P, etc.
+# Install on: Linux agent hosts
 # Version: 1.1.0
 # ═══════════════════════════════════════════════════════════════════════
 
