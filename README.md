@@ -284,10 +284,10 @@ python3 sentinel-collector.py --generate-key
 
 # Configure collector (/etc/hbv-sentinel/collector.env)
 HBV_API_KEY_REQUIRED=true
-HBV_API_KEY=your-generated-key-here
+HBV_API_KEY=<your-generated-key-here>
 
 # Configure agents (/etc/hbv-sentinel/agent.env)
-HBV_API_KEY=your-generated-key-here
+HBV_API_KEY=<your-generated-key-here>
 
 # Restart services
 systemctl restart hbv-sentinel-collector
@@ -424,3 +424,4 @@ Demonstrates advanced infrastructure monitoring using offensive security design 
 🦡 HoneyBadger Vanguard 2.0 - Infrastructure Monitoring  
 CyberShield 2026 - 198 Days Remaining  
 ═══════════════════════════════════════════════════════════
+

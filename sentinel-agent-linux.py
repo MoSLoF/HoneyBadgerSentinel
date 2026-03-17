@@ -515,7 +515,7 @@ def install_service():
 # HBV_COLLECTOR_URL=http://<COLLECTOR_IP>:8443/api/beacon
 
 # API Key (if collector requires authentication)
-# HBV_API_KEY=your-api-key-here
+# HBV_API_KEY=<your-api-key-here>
 
 # Beacon interval in seconds
 # HBV_BEACON_INTERVAL=30
@@ -582,3 +582,4 @@ if __name__ == "__main__":
         print("\n[✓] Metrics test complete")
     else:
         start_sentinel_agent()
+

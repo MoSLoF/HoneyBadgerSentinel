@@ -57,7 +57,7 @@ if [ ! -f "$ENV_FILE" ]; then
 
 # Authentication (enable for production)
 # HBV_API_KEY_REQUIRED=false
-# HBV_API_KEY=your-secure-api-key-here
+# HBV_API_KEY=<your-secure-api-key-here>
 
 # CORS (comma-separated list of allowed origins)
 # HBV_ALLOWED_ORIGINS=*
@@ -138,3 +138,4 @@ echo "  journalctl -u hbv-sentinel-collector -f"
 echo "  curl http://localhost:8443/api/stats"
 echo "  python3 /opt/hbv-sentinel/sentinel-collector.py --generate-key"
 echo ""
+
