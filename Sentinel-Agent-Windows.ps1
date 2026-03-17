@@ -18,7 +18,7 @@
 # CONFIGURATION (with environment variable support)
 # ═══════════════════════════════════════════════════════════════════════
 
-function <Get-EnvOrDefault> {
+function Get-EnvOrDefault {
     param(
         [string]$Name,
         [string]$Default
@@ -54,12 +54,12 @@ function Get-EnvBoolOrDefault {
 
 $script:Config = @{
     # Agent Identity
-    AgentID = <Get-EnvOrDefault> -Name "HBV_AGENT_ID" -Default $env:COMPUTERNAME
+    AgentID = Get-EnvOrDefault -Name "HBV_AGENT_ID" -Default $env:COMPUTERNAME
     AgentType = "windows"
 
     # Collector Configuration
-    APIEndpoint = <Get-EnvOrDefault> -Name "HBV_COLLECTOR_URL" -Default "http://<COLLECTOR_IP>:8443/api/beacon"
-    APIKey = <Get-EnvOrDefault> -Name "HBV_API_KEY" -Default ""
+    APIEndpoint = Get-EnvOrDefault -Name "HBV_COLLECTOR_URL" -Default "http://<COLLECTOR_IP>:8443/api/beacon"
+    APIKey = Get-EnvOrDefault -Name "HBV_API_KEY" -Default ""
 
     # Beacon Settings
     BeaconInterval = Get-EnvIntOrDefault -Name "HBV_BEACON_INTERVAL" -Default 30
@@ -68,7 +68,7 @@ $script:Config = @{
     RequestTimeout = Get-EnvIntOrDefault -Name "HBV_REQUEST_TIMEOUT" -Default 10
 
     # Queue Settings (offline resilience)
-    QueuePath = <Get-EnvOrDefault> -Name "HBV_QUEUE_PATH" -Default "$env:TEMP\HBV-Sentinel-Queue"
+    QueuePath = Get-EnvOrDefault -Name "HBV_QUEUE_PATH" -Default "$env:TEMP\HBV-Sentinel-Queue"
     MaxQueueSize = Get-EnvIntOrDefault -Name "HBV_MAX_QUEUE_SIZE" -Default 100
 
     # Metrics Collection
@@ -80,8 +80,8 @@ $script:Config = @{
     CollectGPU = Get-EnvBoolOrDefault -Name "HBV_COLLECT_GPU" -Default $true
 
     # Logging
-    LogPath = <Get-EnvOrDefault> -Name "HBV_LOG_PATH" -Default "$env:TEMP\HBV-Sentinel.log"
-    LogLevel = <Get-EnvOrDefault> -Name "HBV_LOG_LEVEL" -Default "INFO"
+    LogPath = Get-EnvOrDefault -Name "HBV_LOG_PATH" -Default "$env:TEMP\HBV-Sentinel.log"
+    LogLevel = Get-EnvOrDefault -Name "HBV_LOG_LEVEL" -Default "INFO"
 }
 
 # Graceful shutdown flag
