@@ -1,459 +1,370 @@
-# 🦡 HoneyBadger Sentinel - Deployment Guide
+# 🦡 HoneyBadger Sentinel — Deployment Guide
 
 **C2-Style Infrastructure Monitoring for CyberShield 2026**
+**Version:** 1.1.2 (hardened production baseline)
 
 ---
 
-## 📋 System Overview
+## 📋 System overview
 
-HoneyBadger Sentinel is a distributed monitoring system with C2-style beacon architecture:
+Sentinel is a distributed monitoring system with a C2-style beacon architecture. The **only** supported production topology puts a TLS-terminating reverse proxy in front of a loopback-bound collector:
 
 ```
-┌─────────────────────────────────────────────────┐
-│  Central Collector (Collector: <COLLECTOR_IP>)    │
-│  ├─ FastAPI HTTP Server (Port 8443)             │
-│  ├─ SQLite Time-Series Database                 │
-│  ├─ Alert Engine                                │
-│  └─ Web Dashboard                               │
-└─────────────────────────────────────────────────┘
-              ▲
-              │ HTTP Beacons (30s interval)
-              │
-    ┌─────────┼─────────┬─────────┬─────────┐
-    │         │         │         │         │
-  ┌─▼─┐     ┌─▼─┐     ┌─▼─┐     ┌─▼─┐     ┌─▼─┐
-  │NAS│     │R720│    │OPi│     │TUF│     │G16│
-  └───┘     └────┘    └───┘     └───┘     └───┘
-  Linux     Linux     Linux     Windows   Windows
-  Agent     Agent     Agent     Agent     Agent
+                     ┌────────────────────────────────┐
+                     │  Reverse proxy (nginx / caddy) │
+                     │  https://collector.example:443 │
+                     │  ─ terminates TLS              │
+                     │  ─ forwards → 127.0.0.1:8443   │
+                     └───────────────┬────────────────┘
+                                     │ loopback only
+                     ┌───────────────▼────────────────┐
+                     │  sentinel-collector (loopback) │
+                     │  ─ HBV_API_KEY_REQUIRED=true   │
+                     │  ─ SQLite time-series DB       │
+                     │  ─ alert engine                │
+                     └────────────────────────────────┘
+                                     ▲
+                       HTTPS + X-API-Key + freshness
+                                     │
+        ┌────────────────┬───────────┴────────────┬────────────────┐
+        │                │                        │                │
+    ┌───▼───┐        ┌───▼───┐                ┌───▼───┐        ┌───▼───┐
+    │Linux  │        │Linux  │                │Windows│        │Windows│
+    │ agent │        │ agent │                │ agent │        │ agent │
+    └───────┘        └───────┘                └───────┘        └───────┘
 ```
+
+Beacons flow **only** over HTTPS with a matching `X-API-Key`. Both agents refuse plaintext HTTP by default; the collector rejects unauthenticated requests to every telemetry endpoint.
+
+For laboratory bring-up on a single host with everything on loopback, see the "Lab-only override" section at the bottom.
 
 ---
 
-## 🚀 Quick Start (5 Minutes)
+## 🚀 Full deployment
 
-### Step 1: Install Collector (Collector R720)
+### Step 1: Install the collector
 
 ```bash
-# SSH to Collector
-ssh <user>@<COLLECTOR_IP>
-
-# Upload files
-scp sentinel-collector.py install-collector.sh <user>@<COLLECTOR_IP>:~
-
-# Install
-chmod +x install-collector.sh
 sudo ./install-collector.sh
 ```
 
-### Step 2: Install Linux Agents (NAS, OrangePi)
+The installer:
+- Generates a stable API key and writes it to `/etc/hbv-sentinel/api.key` (mode 0600).
+- Writes hardened defaults to `/etc/hbv-sentinel/collector.env` (loopback bind, auth-required, empty CORS, docs off).
+- Installs `hbv-sentinel-collector.service` and starts it.
+
+Verify the collector is up:
 
 ```bash
-# SSH to NAS
-ssh <user>@<NAS_IP>
-
-# Upload files
-scp sentinel-agent-linux.py install-agent-linux.sh <user>@<NAS_IP>:~
-
-# Install
-chmod +x install-agent-linux.sh
-sudo ./install-agent-linux.sh
+curl http://127.0.0.1:8443/health
+# → {"status":"healthy","timestamp":…,"version":"1.1.2"}
 ```
 
-### Step 3: Install Windows Agents (TUF, G16)
-
-```powershell
-# On Windows Workstation
-Copy-Item Sentinel-Agent-Windows.ps1 C:\HBV\
-
-# Install as scheduled task
-cd C:\HBV
-.\Sentinel-Agent-Windows.ps1 -Install
-
-# Start agent
-Start-ScheduledTask -TaskName "HoneyBadger-Sentinel"
-```
-
-### Step 4: Verify Operation
+Verify authenticated access works:
 
 ```bash
-# Check collector stats
-curl http://<COLLECTOR_IP>:8443/api/stats | jq
-
-# Check active agents
-curl http://<COLLECTOR_IP>:8443/api/agents | jq
+curl -H "X-API-Key: $(sudo cat /etc/hbv-sentinel/api.key)" \
+     http://127.0.0.1:8443/api/stats
 ```
 
----
+### Step 2: Stand up the TLS reverse proxy
 
-## 📦 Detailed Installation
+Any of nginx, caddy, or traefik works. The collector never terminates TLS itself. The proxy MUST:
 
-### Prerequisites
+- Listen on the LAN address (e.g. `0.0.0.0:443`).
+- Terminate TLS with a certificate the agents trust (public CA or private CA distributed to agents as `HBV_TLS_CA_BUNDLE`).
+- Forward all requests to `http://127.0.0.1:8443` (loopback, no re-encryption needed since it never leaves the host).
+- Preserve the `X-API-Key` header (this is the default; do not strip it).
 
-**Collector (Collector):**
-- Ubuntu/Debian Linux
-- Python 3.8+
-- pip3
-- Root access
+**Do not change `HBV_HOST` on the collector.** Keeping it on `127.0.0.1` guarantees that a misconfigured or missing proxy cannot accidentally expose the collector on the LAN.
 
-**Linux Agents:**
-- Any Linux distribution
-- Python 3.8+
-- pip3
-- Root access
+Minimal caddy example (`/etc/caddy/Caddyfile`):
 
-**Windows Agents:**
-- Windows 10/11
-- PowerShell 7+
-- Administrator access
+```
+collector.example.com {
+    reverse_proxy 127.0.0.1:8443
+}
+```
 
----
+Minimal nginx example:
 
-## 🔧 Configuration
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name collector.example.com;
+    ssl_certificate     /etc/ssl/collector.pem;
+    ssl_certificate_key /etc/ssl/collector.key;
 
-### Collector Configuration
-
-Edit `/opt/hbv-sentinel/sentinel-collector.py`:
-
-```python
-CONFIG = {
-    "host": "0.0.0.0",        # Listen on all interfaces
-    "port": 8443,             # API port
-    "db_path": "/opt/hbv-sentinel/sentinel.db",
-    "retention_days": 30,     # Data retention
-    
-    # Alert thresholds
-    "alert_thresholds": {
-        "cpu_percent": 90,
-        "memory_percent": 90,
-        "disk_percent": 90,
-        "gpu_temp_c": 85
+    location / {
+        proxy_pass         http://127.0.0.1:8443;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
     }
 }
 ```
 
-### Linux Agent Configuration
+Test the full path from another host:
 
-Edit `/opt/hbv-sentinel/sentinel-agent-linux.py`:
-
-```python
-CONFIG = {
-    "agent_id": socket.gethostname(),
-    "api_endpoint": "http://<COLLECTOR_IP>:8443/api/beacon",
-    "beacon_interval": 30,    # Beacon every 30 seconds
-    "max_retries": 3,
-    "queue_path": "/tmp/hbv-sentinel-queue",
-}
+```bash
+curl -H "X-API-Key: <the-key>" \
+     https://collector.example.com/api/stats
 ```
 
-### Windows Agent Configuration
+### Step 3: Install a Linux agent
 
-Edit `Sentinel-Agent-Windows.ps1`:
+```bash
+sudo ./install-agent-linux.sh
+```
+
+Edit `/etc/hbv-sentinel/agent.env` and set at minimum:
+
+```bash
+HBV_COLLECTOR_URL=https://collector.example.com/api/beacon
+HBV_API_KEY=<paste the key from /etc/hbv-sentinel/api.key on the collector>
+# Private-CA collector? Uncomment and point at the CA bundle:
+# HBV_TLS_CA_BUNDLE=/etc/hbv-sentinel/ca.pem
+```
+
+Start the agent:
+
+```bash
+sudo systemctl restart hbv-sentinel
+sudo journalctl -u hbv-sentinel -f
+# Expect: "Beacon transmitted successfully"
+```
+
+### Step 4: Install a Windows agent
+
+Copy `Sentinel-Agent-Windows.ps1` to the target host, then in **PowerShell 7 as Administrator**:
 
 ```powershell
-$script:Config = @{
-    AgentID = $env:COMPUTERNAME
-    APIEndpoint = "http://<COLLECTOR_IP>:8443/api/beacon"
-    BeaconInterval = 30       # Beacon every 30 seconds
-    MaxRetries = 3
-    QueuePath = "$env:TEMP\HBV-Sentinel-Queue"
-}
+[Environment]::SetEnvironmentVariable(
+    "HBV_COLLECTOR_URL", "https://collector.example.com/api/beacon", "Machine")
+[Environment]::SetEnvironmentVariable(
+    "HBV_API_KEY", "<paste the key>", "Machine")
+
+# For a private-CA collector cert, import the CA into
+# "Local Machine → Trusted Root Certification Authorities" first.
+
+cd C:\HBV
+.\Sentinel-Agent-Windows.ps1 -Test          # confirm metrics collection works
+.\Sentinel-Agent-Windows.ps1 -Install       # register scheduled task
+Start-ScheduledTask -TaskName "HoneyBadger-Sentinel"
+Get-Content "$env:TEMP\HBV-Sentinel.log" -Tail 20
+```
+
+If the agent logs "Refusing to send beacon over plaintext HTTP," the `HBV_COLLECTOR_URL` value is `http://…`. Switch it to `https://…`.
+
+### Step 5: Verify
+
+```bash
+# Are all agents visible?
+curl -H "X-API-Key: <key>" https://collector.example.com/api/agents | jq
+
+# Beacon volume in the last hour:
+curl -H "X-API-Key: <key>" https://collector.example.com/api/stats | jq
+```
+
+---
+
+## 🔧 Configuration reference
+
+All configuration is via environment variables. The `install-collector.sh` script writes a complete `/etc/hbv-sentinel/collector.env` on first run with hardened defaults; the environment values below are what those defaults resolve to.
+
+### Collector (`/etc/hbv-sentinel/collector.env`)
+
+```bash
+HBV_HOST=127.0.0.1
+HBV_PORT=8443
+HBV_API_KEY_REQUIRED=true
+HBV_API_KEY=<generated by installer into /etc/hbv-sentinel/api.key>
+HBV_ALLOWED_ORIGINS=            # empty by default
+HBV_BEACON_MAX_SKEW=300         # ±5 min freshness + replay window
+HBV_ENABLE_DOCS=false           # /docs, /redoc, /openapi.json OFF
+HBV_ENABLE_DASHBOARD=false      # GET / OFF; enable only from a management origin
+HBV_RATE_LIMIT_REQUESTS=100
+HBV_RATE_LIMIT_WINDOW=60
+HBV_DB_PATH=/opt/hbv-sentinel/sentinel.db
+HBV_RETENTION_DAYS=30
+```
+
+### Linux agent (`/etc/hbv-sentinel/agent.env`)
+
+```bash
+HBV_COLLECTOR_URL=https://collector.example.com/api/beacon
+HBV_API_KEY=<same value as the collector>
+# HBV_TLS_CA_BUNDLE=/etc/hbv-sentinel/ca.pem    # optional, for private CA
+# HBV_ALLOW_INSECURE=false                       # keep false in production
+HBV_BEACON_INTERVAL=30
+```
+
+### Windows agent (machine environment variables)
+
+```powershell
+HBV_COLLECTOR_URL   = "https://collector.example.com/api/beacon"
+HBV_API_KEY         = "<same value as the collector>"
+# HBV_ALLOW_INSECURE = "false"                   # keep false in production
+# HBV_TLS_CA_BUNDLE  = "false"                   # ONLY if you must skip verify
+HBV_BEACON_INTERVAL = 30
 ```
 
 ---
 
 ## 📊 Dashboard & API
 
-### Web Dashboard
+### Web dashboard (opt-in)
 
-Open in browser:
+The interactive dashboard at `GET /` is DISABLED by default so the collector's only anonymous public route is `/health`. To enable the dashboard, set `HBV_ENABLE_DASHBOARD=true` in `/etc/hbv-sentinel/collector.env` and restart. Place the dashboard behind reverse-proxy access control — an IP allowlist, mTLS, a management VLAN, or a separate proxy host that only your operators reach.
+
+When enabled, the page loads an empty shell; paste the API key into the field labeled "API key" and click "Use key." The key stays in the tab's `sessionStorage` and is cleared when the tab closes. The HTML itself contains no secret.
+
+For load balancer / uptime health checks, use `/health` — never the dashboard shell.
+
+### API endpoints (every one requires `X-API-Key` unless marked)
+
 ```
-http://<COLLECTOR_IP>:8443
+POST /api/beacon             # Beacon submission (agents)
+GET  /api/agents
+GET  /api/beacons/latest
+GET  /api/beacons/{agent_id}
+GET  /api/alerts
+GET  /api/stats
+GET  /metrics                # Prometheus
+GET  /health                 # (open) liveness probe — the ONLY anonymous route by default
+GET  /                       # Dashboard shell — DISABLED unless HBV_ENABLE_DASHBOARD=true
 ```
 
-Real-time view of:
-- Agents online/offline
-- Beacon activity
-- Active alerts
+`/docs`, `/redoc`, and `/openapi.json` are OFF by default. Set `HBV_ENABLE_DOCS=true` only in a local dev instance.
 
-### API Endpoints
+Example authenticated calls:
 
 ```bash
-# Get statistics
-curl http://<COLLECTOR_IP>:8443/api/stats
-
-# List all agents
-curl http://<COLLECTOR_IP>:8443/api/agents
-
-# Get latest beacons
-curl http://<COLLECTOR_IP>:8443/api/beacons/latest?limit=10
-
-# Get agent-specific beacons
-curl http://<COLLECTOR_IP>:8443/api/beacons/Windows Workstation?limit=10
-
-# Get active alerts
-curl http://<COLLECTOR_IP>:8443/api/alerts
-```
-
-### API Documentation
-
-Interactive Swagger docs:
-```
-http://<COLLECTOR_IP>:8443/docs
+curl -H "X-API-Key: $KEY" https://collector.example.com/api/stats
+curl -H "X-API-Key: $KEY" https://collector.example.com/api/agents
+curl -H "X-API-Key: $KEY" https://collector.example.com/api/beacons/latest?limit=10
+curl -H "X-API-Key: $KEY" "https://collector.example.com/api/beacons/nas-server?limit=10"
+curl -H "X-API-Key: $KEY" https://collector.example.com/api/alerts
 ```
 
 ---
 
-## 🔍 Monitoring & Management
+## 🚨 Alert system
 
-### Check Collector Status
+Alert types: CPU high (>90%), memory high (>90%), disk high (>90%), GPU temp (>85°C), RAID degraded.
 
-```bash
-# Service status
-systemctl status hbv-sentinel-collector
-
-# View logs
-journalctl -u hbv-sentinel-collector -f
-
-# Check stats
-curl http://localhost:8443/api/stats | jq
-```
-
-### Check Agent Status (Linux)
+Viewing alerts:
 
 ```bash
-# Service status
-systemctl status hbv-sentinel
-
-# View logs
-journalctl -u hbv-sentinel -f
-
-# Test metrics collection
-python3 /opt/hbv-sentinel/sentinel-agent-linux.py --test
-```
-
-### Check Agent Status (Windows)
-
-```powershell
-# Check scheduled task
-Get-ScheduledTask -TaskName "HoneyBadger-Sentinel"
-
-# View logs
-Get-Content "$env:TEMP\HBV-Sentinel.log" -Tail 50
-
-# Test metrics collection
-.\Sentinel-Agent-Windows.ps1 -Test
+curl -H "X-API-Key: $KEY" https://collector.example.com/api/alerts | jq
+curl -H "X-API-Key: $KEY" https://collector.example.com/api/alerts | \
+    jq '.alerts[] | select(.agent_id == "NAS")'
 ```
 
 ---
 
-## 🚨 Alert System
+## 🔐 Security considerations
 
-### Alert Types
+- **Auth is mandatory** on every telemetry endpoint. Do not disable it on any host that can be reached from another machine.
+- **Loopback bind is mandatory** for the collector process. TLS termination and LAN exposure happen at the reverse proxy, never at the collector itself.
+- **The API key is collector-wide** in the current release: any holder can submit as any `agent_id`. Rotate the key if any host is decommissioned or suspected compromised (see below).
+- **The replay guard is in-memory and single-process.** Do not run the collector under a multi-worker uvicorn configuration — it cannot coordinate replay state across workers.
+- **Rate limiting is per client IP.** Because the collector sees `127.0.0.1` when a proxy is in front, either terminate the proxy on the same box (where the source IP loses meaning anyway) or add proxy-aware handling before scaling load.
 
-1. **CPU High** - CPU usage > 90%
-2. **Memory High** - Memory usage > 90%
-3. **Disk High** - Disk usage > 90%
-4. **GPU Temperature** - GPU temp > 85°C
-5. **RAID Degraded** - RAID array not healthy
-
-### Viewing Alerts
+### Key rotation
 
 ```bash
-# Get all unresolved alerts
-curl http://<COLLECTOR_IP>:8443/api/alerts | jq
+# On the collector
+NEW_KEY=$(python3 /opt/hbv-sentinel/sentinel-collector.py --generate-key | awk '/Generated/{print $NF}')
+echo "$NEW_KEY" | sudo tee /etc/hbv-sentinel/api.key
+sudo sed -i "s/^HBV_API_KEY=.*/HBV_API_KEY=$NEW_KEY/" /etc/hbv-sentinel/collector.env
+sudo systemctl restart hbv-sentinel-collector
 
-# Filter by agent
-curl http://<COLLECTOR_IP>:8443/api/alerts | jq '.alerts[] | select(.agent_id == "NAS")'
+# On every agent
+sudo sed -i "s/^HBV_API_KEY=.*/HBV_API_KEY=$NEW_KEY/" /etc/hbv-sentinel/agent.env
+sudo systemctl restart hbv-sentinel
 ```
 
----
-
-## 🔐 Security Considerations
-
-### Current Implementation
-- HTTP (unencrypted)
-- No authentication
-- Suitable for isolated lab network
-
-### Production Hardening (Optional)
-1. Enable HTTPS with TLS certificates
-2. Add API key authentication
-3. Implement rate limiting
-4. Firewall rules (allow only trusted IPs)
-
----
-
-## 🎯 CyberShield 2026 Demo Tips
-
-### Pre-Demo Checklist
-
-```bash
-# 1. Verify all agents online
-curl http://<COLLECTOR_IP>:8443/api/agents | jq '.agents[] | select(.status == "online")'
-
-# 2. Check recent beacon activity
-curl http://<COLLECTOR_IP>:8443/api/stats | jq '.beacons.last_hour'
-
-# 3. Clear old alerts
-# (Manual via database if needed)
-
-# 4. Test dashboard
-curl http://<COLLECTOR_IP>:8443/health
-```
-
-### Demo Talking Points
-
-✅ **"C2-Style Infrastructure Monitoring"**
-- Beacon-based architecture similar to red team C2 frameworks
-- Distributed agent network
-- Centralized command and control
-
-✅ **"Offline Resilience"**
-- Agents queue beacons when collector is offline
-- Automatic catch-up when connectivity restored
-- No data loss during network outages
-
-✅ **"Real-Time Telemetry"**
-- 30-second beacon intervals
-- Time-series metrics storage
-- Historical trend analysis
-
-✅ **"Multi-Platform Support"**
-- Windows PowerShell agents
-- Linux Python agents
-- Unified data collection
-
-✅ **"Custom Integrations"**
-- NAS RAID health monitoring
-- GPU temperature monitoring
-- Vehicle telemetry (KITT) ready
+Windows agents: update the `HBV_API_KEY` machine environment variable and `Restart-ScheduledTask -TaskName "HoneyBadger-Sentinel"`.
 
 ---
 
 ## 🛠️ Troubleshooting
 
-### Agents Not Connecting
+### Agents not connecting
 
 ```bash
-# Check network connectivity
-ping <COLLECTOR_IP>
+# Is the collector process up?
+sudo systemctl status hbv-sentinel-collector
+sudo journalctl -u hbv-sentinel-collector -n 50
 
-# Check collector is running
-systemctl status hbv-sentinel-collector
+# Can the proxy reach the collector?
+curl http://127.0.0.1:8443/health         # on the collector host
 
-# Check firewall
+# Can the agent reach the proxy?
+curl -k -H "X-API-Key: $KEY" https://collector.example.com/health
+
+# Firewall?
 sudo ufw status
 sudo firewall-cmd --list-all
-
-# Test API endpoint
-curl http://<COLLECTOR_IP>:8443/health
 ```
 
-### High Beacon Queue on Agent
+### 401 Unauthorized
+
+Keys don't match. Re-copy the value from `/etc/hbv-sentinel/api.key` on the collector to every agent's `HBV_API_KEY`.
+
+### 503 Service Unavailable on `/api/beacon`
+
+The collector received the beacon but could not persist it. Check `journalctl -u hbv-sentinel-collector -n 100` for the underlying SQLite error (disk full, permissions, corrupt DB). The agent will keep retrying — no beacon is lost.
+
+### "Refusing to send beacon over plaintext HTTP"
+
+The agent's `HBV_COLLECTOR_URL` starts with `http://`. Either switch to `https://` (correct) or, for a lab-only override, set `HBV_ALLOW_INSECURE=true`.
+
+### High beacon queue on an agent
 
 ```bash
-# Check queue directory
+# Linux
 ls -lah /tmp/hbv-sentinel-queue/
+journalctl -u hbv-sentinel -n 100
+sudo systemctl restart hbv-sentinel
 
-# Check collector logs
-journalctl -u hbv-sentinel-collector -n 100
-
-# Manually flush queue by restarting agent
-systemctl restart hbv-sentinel
+# Windows
+Get-ChildItem "$env:TEMP\HBV-Sentinel-Queue"
+Restart-ScheduledTask -TaskName "HoneyBadger-Sentinel"
 ```
 
-### Database Issues
+### Database maintenance
 
 ```bash
-# Check database file
-ls -lah /opt/hbv-sentinel/sentinel.db
-
-# Backup database
-cp /opt/hbv-sentinel/sentinel.db /opt/hbv-sentinel/sentinel.db.backup
-
-# Reset database (WARNING: Deletes all data)
-systemctl stop hbv-sentinel-collector
-rm /opt/hbv-sentinel/sentinel.db
-systemctl start hbv-sentinel-collector
-```
-
----
-
-## 📈 Performance Tuning
-
-### Adjust Beacon Intervals
-
-**For Demo (More Frequent):**
-```python
-"beacon_interval": 10  # 10 seconds - more responsive
-```
-
-**For Production (Less Frequent):**
-```python
-"beacon_interval": 60  # 60 seconds - less overhead
-```
-
-### Database Maintenance
-
-```bash
-# Clean up old data (keeps last 7 days)
-sqlite3 /opt/hbv-sentinel/sentinel.db "DELETE FROM beacons WHERE timestamp < strftime('%s', 'now', '-7 days');"
-
-# Vacuum database
+# Manual retention prune (keeps last 7 days)
+sqlite3 /opt/hbv-sentinel/sentinel.db \
+    "DELETE FROM beacons WHERE timestamp < strftime('%s','now','-7 days');"
 sqlite3 /opt/hbv-sentinel/sentinel.db "VACUUM;"
 ```
 
 ---
 
-## 🚀 Next Steps
+## 🧪 Lab-only override (single host, no TLS)
 
-### Phase 2 Enhancements (Optional)
+For local development on a single host where the agent and collector talk over loopback only:
 
-1. **MQTT Integration**
-   - Add Mosquitto broker
-   - Enable MQTT beacons alongside HTTP
-   - Pub/sub alert system
+```bash
+# On the collector (already loopback by default)
+sudo systemctl restart hbv-sentinel-collector
 
-2. **Advanced Dashboard**
-   - Grafana integration
-   - Real-time graphs
-   - Historical charts
-   - Topology visualization
+# In the agent's env file
+HBV_COLLECTOR_URL=http://127.0.0.1:8443/api/beacon
+HBV_ALLOW_INSECURE=true
+HBV_API_KEY=<the key from /etc/hbv-sentinel/api.key>
+```
 
-3. **Vehicle Integration**
-   - OBD2/CAN bus metrics from KITT
-   - GPS location tracking
-   - Speed/RPM telemetry
-
-4. **Alert Notifications**
-   - Email notifications
-   - SMS alerts
-   - Slack/Discord webhooks
+This is **not** a production configuration. The agent logs a warning every beacon so it is impossible to leave this mode in place by accident.
 
 ---
-
-## 📝 Additional Resources
-
-- Collector logs: `/var/log/hbv-sentinel/`
-- Agent logs (Linux): `/var/log/hbv-sentinel.log`
-- Agent logs (Windows): `%TEMP%\HBV-Sentinel.log`
-- Database: `/opt/hbv-sentinel/sentinel.db`
-- API docs: `http://<COLLECTOR_IP>:8443/docs`
-
----
-
-## 🦡 Support
-
-For issues during CyberShield 2026:
-1. Check logs first
-2. Verify network connectivity
-3. Restart services if needed
-4. Check GitHub issues (if open-sourced)
-
-**System is designed for autonomous operation - set it and forget it!**
 
 ═══════════════════════════════════════════════════════════
-🦡 HoneyBadger Vanguard 2.0 - Sentinel Monitoring System
-CyberShield 2026 - Infrastructure Resilience Demonstration
+🦡 HoneyBadger Vanguard 2.0 — Sentinel Monitoring System
+CyberShield 2026 — Infrastructure Resilience Demonstration
 ═══════════════════════════════════════════════════════════

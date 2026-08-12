@@ -1,0 +1,78 @@
+name: CI
+
+# Actions are SHA-pinned (not float-tagged) so a compromised or retagged
+# release cannot silently swap what runs against this repo. Bump by editing
+# the SHA and the trailing # v-tag comment together.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-python:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi 'pydantic>=2.5' uvicorn httpx requests psutil pytest
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+  # Executable PowerShell coverage for the Windows agent's transport policy
+  # (review finding R-01). Runs the real PowerShell 7 runtime with Pester 5
+  # against Sentinel-Agent-Windows.ps1, mocks Invoke-RestMethod so no
+  # network I/O happens, and asserts the exact behaviour the reviewer named:
+  # HTTPS default, HTTP refusal, TLS verify default-on, explicit lab override.
+  test-powershell:
+    name: pester (PowerShell 7 on Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Pester 5
+        shell: pwsh
+        run: |
+          Install-Module -Name Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module Pester -MinimumVersion 5.5.0 -Force
+          Get-Module Pester
+
+      - name: Run Pester tests
+        shell: pwsh
+        run: |
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'tests/agent-windows.Tests.ps1'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputFormat = 'NUnitXml'
+          $config.TestResult.OutputPath = 'pester-results.xml'
+          Invoke-Pester -Configuration $config
+
+      - name: Upload Pester results
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: pester-results-${{ github.run_id }}
+          path: pester-results.xml
+          if-no-files-found: warn

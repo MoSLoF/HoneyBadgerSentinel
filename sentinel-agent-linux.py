@@ -6,7 +6,7 @@ Lightweight monitoring agent that beacons system metrics to central collector.
 C2-style architecture with MQTT and HTTP fallback.
 
 Author: HoneyBadger
-Version: 1.1.0
+Version: 1.1.4
 CyberShield 2026 - Infrastructure Monitoring
 """
 
@@ -47,9 +47,17 @@ CONFIG = {
     "agent_id": get_env("HBV_AGENT_ID", socket.gethostname()),
     "agent_type": "linux",
 
-    # Collector Configuration
-    "api_endpoint": get_env("HBV_COLLECTOR_URL", "http://<COLLECTOR_IP>:8443/api/beacon"),
+    # Collector Configuration. HTTPS by default: the beacon carries the API key
+    # and complete host telemetry — cleartext is a credential-and-fingerprint
+    # leak on the wire. Plain http:// is rejected unless the operator sets
+    # HBV_ALLOW_INSECURE=true (documented for lab/loopback only).
+    "api_endpoint": get_env("HBV_COLLECTOR_URL", "https://<COLLECTOR_HOST>:8443/api/beacon"),
     "api_key": get_env("HBV_API_KEY", ""),
+    "allow_insecure": get_env_bool("HBV_ALLOW_INSECURE", False),
+    # TLS verification is on by default. HBV_TLS_CA_BUNDLE can point at a
+    # private-CA bundle for a self-signed collector; setting it to the string
+    # "false" disables verification entirely (again — lab only, logs a warning).
+    "tls_ca_bundle": get_env("HBV_TLS_CA_BUNDLE", ""),
 
     # Beacon Settings
     "beacon_interval": get_env_int("HBV_BEACON_INTERVAL", 30),
@@ -326,21 +334,65 @@ def send_queued_beacons() -> int:
 # BEACON TRANSMISSION
 # ═══════════════════════════════════════════════════════════════════════
 
+def _resolve_verify_arg():
+    """Compute the requests `verify=` argument from HBV_TLS_CA_BUNDLE.
+
+    Empty (default) → True (verify against system trust store).
+    Literal "false" → False (disable verification, lab use only).
+    Any other value → path to a CA bundle.
+    """
+    bundle = CONFIG['tls_ca_bundle']
+    if not bundle:
+        return True
+    if bundle.strip().lower() == "false":
+        logger.warning("TLS verification DISABLED via HBV_TLS_CA_BUNDLE=false — lab use only")
+        return False
+    return bundle
+
+
 def send_beacon_http(metrics: Dict) -> bool:
-    """Send beacon via HTTP POST."""
+    """Send beacon via HTTP(S) POST.
+
+    Refuses cleartext http:// unless HBV_ALLOW_INSECURE=true is set. The beacon
+    carries the API key (X-API-Key header) and full host telemetry; sending
+    those in the clear leaks credentials and the host fingerprint on the wire.
+    """
+    endpoint = CONFIG['api_endpoint']
+    lower = endpoint.lower()
+
+    if lower.startswith("http://") and not CONFIG['allow_insecure']:
+        logger.error(
+            "Refusing to send beacon over plaintext HTTP (%s). "
+            "Set HBV_COLLECTOR_URL to https://… or, for a lab-only override, "
+            "HBV_ALLOW_INSECURE=true.",
+            endpoint,
+        )
+        return False
+    if lower.startswith("http://") and CONFIG['allow_insecure']:
+        logger.warning(
+            "Sending beacon over plaintext HTTP because HBV_ALLOW_INSECURE=true — "
+            "credentials and host telemetry are on the wire in the clear."
+        )
+    if not (lower.startswith("http://") or lower.startswith("https://")):
+        logger.error("HBV_COLLECTOR_URL must start with http:// or https:// (got %s)", endpoint)
+        return False
+
     headers = {'Content-Type': 'application/json'}
 
     # Add API key if configured
     if CONFIG['api_key']:
         headers['X-API-Key'] = CONFIG['api_key']
 
+    verify_arg = _resolve_verify_arg() if lower.startswith("https://") else False
+
     for attempt in range(1, CONFIG['max_retries'] + 1):
         try:
             response = requests.post(
-                CONFIG['api_endpoint'],
+                endpoint,
                 json=metrics,
                 timeout=CONFIG['request_timeout'],
-                headers=headers
+                headers=headers,
+                verify=verify_arg,
             )
 
             if response.status_code == 200:
@@ -405,7 +457,7 @@ def start_sentinel_agent():
     print("║  🦡 HoneyBadger Sentinel Agent - Starting...             ║")
     print("╚═══════════════════════════════════════════════════════════╝\n")
 
-    logger.info("HoneyBadger Sentinel Agent v1.1.0")
+    logger.info("HoneyBadger Sentinel Agent v1.1.4")
     logger.info(f"Agent ID: {CONFIG['agent_id']}")
     logger.info(f"Collector: {CONFIG['api_endpoint']}")
     logger.info(f"Beacon Interval: {CONFIG['beacon_interval']}s")
@@ -511,11 +563,18 @@ def install_service():
         sample_env = """# HoneyBadger Sentinel Agent Configuration
 # Uncomment and modify as needed
 
-# Collector URL
-# HBV_COLLECTOR_URL=http://<COLLECTOR_IP>:8443/api/beacon
+# Collector URL (HTTPS required by default; see HBV_ALLOW_INSECURE for lab use)
+# HBV_COLLECTOR_URL=https://<COLLECTOR_HOST>:8443/api/beacon
 
-# API Key (if collector requires authentication)
+# API Key — REQUIRED by the collector unless HBV_API_KEY_REQUIRED is disabled
 # HBV_API_KEY=<your-api-key-here>
+
+# TLS trust anchor for a private/self-signed collector cert
+# HBV_TLS_CA_BUNDLE=/etc/hbv-sentinel/ca.pem
+# Setting HBV_TLS_CA_BUNDLE=false disables verification (LAB ONLY).
+
+# Cleartext transport override (LAB ONLY — beacon carries API key + telemetry).
+# HBV_ALLOW_INSECURE=false
 
 # Beacon interval in seconds
 # HBV_BEACON_INTERVAL=30

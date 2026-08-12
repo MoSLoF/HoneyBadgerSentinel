@@ -2,37 +2,32 @@
 # ═══════════════════════════════════════════════════════════════════════
 # HoneyBadger Sentinel - Linux Agent Installation Script
 # Install on: Linux agent hosts
-# Version: 1.1.0
+# Version: 1.1.2
 # ═══════════════════════════════════════════════════════════════════════
 
-set -e
+set -euo pipefail
 
 echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║  🦡 HoneyBadger Sentinel Agent v1.1.0 - Installation     ║"
+echo "║  🦡 HoneyBadger Sentinel Agent v1.1.2 - Installation     ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
 
-# Check if running as root
 if [ "$EUID" -ne 0 ]; then
     echo "[!] Please run as root (sudo)"
     exit 1
 fi
 
-# Install Python dependencies
 echo "[*] Installing Python dependencies..."
 pip3 install --break-system-packages requests psutil 2>/dev/null || \
 pip3 install requests psutil
 
-# Copy agent script
 echo "[*] Installing agent..."
 mkdir -p /opt/hbv-sentinel
 cp sentinel-agent-linux.py /opt/hbv-sentinel/
 chmod +x /opt/hbv-sentinel/sentinel-agent-linux.py
 
-# Create log directory
 mkdir -p /var/log/hbv-sentinel
 
-# Install as service (creates /etc/hbv-sentinel/agent.env)
 echo "[*] Installing as systemd service..."
 python3 /opt/hbv-sentinel/sentinel-agent-linux.py --install
 
@@ -43,24 +38,24 @@ echo "╚═══════════════════════�
 echo ""
 echo "[✓] Agent installed"
 echo ""
-echo "Starting agent..."
-systemctl start hbv-sentinel.service
-
-sleep 2
-
+echo "── Required configuration before the agent will beacon ─────"
 echo ""
-echo "Service Status:"
-systemctl status hbv-sentinel.service --no-pager | head -15
+echo "  Edit /etc/hbv-sentinel/agent.env and set at minimum:"
 echo ""
-echo "Configuration: /etc/hbv-sentinel/agent.env"
+echo "    HBV_COLLECTOR_URL=https://<collector-host>:8443/api/beacon"
+echo "    HBV_API_KEY=<paste the collector's API key here>"
 echo ""
-echo "Useful Commands:"
-echo "  systemctl status hbv-sentinel"
-echo "  systemctl restart hbv-sentinel"
-echo "  journalctl -u hbv-sentinel -f"
+echo "  If your collector uses a private-CA TLS certificate, also set:"
+echo "    HBV_TLS_CA_BUNDLE=/etc/hbv-sentinel/ca.pem"
 echo ""
-echo "To configure API key authentication:"
-echo "  1. Edit /etc/hbv-sentinel/agent.env"
-echo "  2. Set HBV_API_KEY=your-api-key"
-echo "  3. systemctl restart hbv-sentinel"
+echo "  Then start the agent:"
+echo "    systemctl start hbv-sentinel"
+echo ""
+echo "  The agent REFUSES to beacon over cleartext http:// by default."
+echo "  For a lab-only override, set HBV_ALLOW_INSECURE=true."
+echo ""
+echo "  Management:"
+echo "    systemctl status hbv-sentinel"
+echo "    systemctl restart hbv-sentinel"
+echo "    journalctl -u hbv-sentinel -f"
 echo ""

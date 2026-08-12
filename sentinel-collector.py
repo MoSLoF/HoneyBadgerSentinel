@@ -6,7 +6,7 @@ C2-style infrastructure monitoring collector.
 Receives beacons from agents via HTTP/MQTT and stores in time-series database.
 
 Author: HoneyBadger
-Version: 1.1.0
+Version: 1.1.4
 CyberShield 2026 - Infrastructure Monitoring
 """
 
@@ -52,17 +52,38 @@ def get_env_list(key: str, default: List[str]) -> List[str]:
         return [item.strip() for item in value.split(",") if item.strip()]
     return default
 
-# Generate a default API key if not set (for development)
+# Default API key if not set. This is EPHEMERAL — it changes on every restart,
+# which is fine for a quick local test and useless for a real deployment (agents
+# would break after a restart). Track whether the operator supplied a real one so
+# startup can warn.
 DEFAULT_API_KEY = secrets.token_urlsafe(32)
+API_KEY_IS_EPHEMERAL = "HBV_API_KEY" not in os.environ
 
 CONFIG = {
-    "host": get_env("HBV_HOST", "0.0.0.0"),
+    # SECURE-BY-DEFAULT (remediation of the unauthenticated-collector exposure):
+    # bind to loopback and require authentication unless the operator explicitly
+    # opts out. A remotely reachable collector with auth off was the finding.
+    "host": get_env("HBV_HOST", "127.0.0.1"),
     "port": get_env_int("HBV_PORT", 8443),
     "db_path": get_env("HBV_DB_PATH", "/opt/hbv-sentinel/sentinel.db"),
     "retention_days": get_env_int("HBV_RETENTION_DAYS", 30),
     "api_key": get_env("HBV_API_KEY", DEFAULT_API_KEY),
-    "api_key_required": get_env("HBV_API_KEY_REQUIRED", "false").lower() == "true",
-    "allowed_origins": get_env_list("HBV_ALLOWED_ORIGINS", ["*"]),
+    "api_key_required": get_env("HBV_API_KEY_REQUIRED", "true").lower() == "true",
+    # Empty by default: the bundled dashboard is same-origin and needs no CORS.
+    # A wildcard "*" is never combined with credentials (see middleware below).
+    "allowed_origins": get_env_list("HBV_ALLOWED_ORIGINS", []),
+    # Reject beacons whose timestamp is outside this many seconds of now
+    # (freshness); also the replay-dedup window.
+    "beacon_max_skew": get_env_int("HBV_BEACON_MAX_SKEW", 300),
+    # FastAPI's /docs, /redoc, /openapi.json enumerate the API schema without
+    # auth. Off by default so a production collector's only anonymous route is
+    # /health; flip HBV_ENABLE_DOCS=true for local dev.
+    "enable_docs": get_env("HBV_ENABLE_DOCS", "false").lower() == "true",
+    # The interactive dashboard shell (GET /) contains no secret but does
+    # present a credential-entry UI to any network client — the reviewer's
+    # health-only public-route target excludes it. Off by default; enable
+    # only from a management origin behind reverse-proxy access control.
+    "enable_dashboard": get_env("HBV_ENABLE_DASHBOARD", "false").lower() == "true",
     "rate_limit_requests": get_env_int("HBV_RATE_LIMIT_REQUESTS", 100),
     "rate_limit_window": get_env_int("HBV_RATE_LIMIT_WINDOW", 60),
     "alert_thresholds": {
@@ -105,11 +126,6 @@ class RAIDStatus(BaseModel):
     array: str = Field(..., max_length=32)
     status: str = Field(..., pattern=r'^(healthy|degraded|unknown)$')
     details: Optional[str] = Field(None, max_length=256)
-
-
-class ServiceStatus(BaseModel):
-    """Service status mapping."""
-    __root__: Dict[str, str] = {}
 
 
 class BeaconRequest(BaseModel):
@@ -198,7 +214,7 @@ class HealthResponse(BaseModel):
     """Health check response."""
     status: str
     timestamp: int
-    version: str = "1.1.0"
+    version: str = "1.1.4"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -246,6 +262,67 @@ rate_limiter = RateLimiter(
     max_requests=CONFIG['rate_limit_requests'],
     window_seconds=CONFIG['rate_limit_window']
 )
+
+# ═══════════════════════════════════════════════════════════════════════
+# REPLAY / FRESHNESS GUARD
+# ═══════════════════════════════════════════════════════════════════════
+
+class ReplayGuard:
+    """Reject beacons that are stale, post-dated, or replayed.
+
+    Two controls, both bounded by CONFIG['beacon_max_skew']:
+      • Freshness — the beacon timestamp must be within ±max_skew of now.
+        A captured beacon replayed hours later fails this immediately.
+      • De-duplication — a (agent_id, timestamp) pair already accepted inside
+        the freshness window is rejected, so an attacker cannot re-post a
+        captured-in-flight beacon verbatim while it is still "fresh".
+
+    In-memory only: state is per-process and resets on restart. That is the
+    correct scope here — a restart also invalidates the window, so nothing
+    older than max_skew could be accepted anyway.
+    """
+
+    def __init__(self, max_skew_seconds: int):
+        self.max_skew = max_skew_seconds
+        self._seen: Dict[str, float] = {}  # "agent_id:timestamp" -> wall time seen
+
+    def _prune(self, wall_now: float) -> None:
+        cutoff = wall_now - self.max_skew
+        self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
+
+    def check(self, agent_id: str, timestamp: int) -> None:
+        now = int(time.time())
+        if abs(now - timestamp) > self.max_skew:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Beacon timestamp outside freshness window (±{self.max_skew}s)"
+            )
+
+        wall = time.time()
+        # Bound memory: prune expired entries once the map grows.
+        if len(self._seen) > 4096:
+            self._prune(wall)
+
+        key = f"{agent_id}:{timestamp}"
+        prev = self._seen.get(key)
+        if prev is not None and prev > wall - self.max_skew:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Duplicate or replayed beacon rejected"
+            )
+        self._seen[key] = wall
+
+    def rollback(self, agent_id: str, timestamp: int) -> None:
+        """Undo a check() reservation when downstream persistence fails.
+
+        Without this, a beacon that failed to persist would still poison the
+        replay window: the honest retry of the same payload would get 409
+        even though nothing was ever stored (review finding S-03).
+        """
+        self._seen.pop(f"{agent_id}:{timestamp}", None)
+
+
+replay_guard = ReplayGuard(max_skew_seconds=CONFIG['beacon_max_skew'])
 
 # ═══════════════════════════════════════════════════════════════════════
 # DATABASE MANAGEMENT
@@ -558,14 +635,27 @@ async def cleanup_task():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    logger.info("🦡 HoneyBadger Sentinel Collector v1.1.0 starting...")
+    logger.info("🦡 HoneyBadger Sentinel Collector v1.1.4 starting...")
     logger.info(f"Database: {CONFIG['db_path']}")
     logger.info(f"Listening on {CONFIG['host']}:{CONFIG['port']}")
+
+    host = CONFIG['host']
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        logger.warning(
+            "⚠ Binding to a NON-LOOPBACK address (%s): the collector is reachable "
+            "from the network. Ensure a firewall / TLS reverse proxy fronts it and "
+            "authentication is enabled.", host)
     if CONFIG['api_key_required']:
         logger.info("API key authentication: ENABLED")
+        if API_KEY_IS_EPHEMERAL:
+            logger.warning(
+                "⚠ HBV_API_KEY is not set — using an EPHEMERAL key that changes on "
+                "every restart. Set HBV_API_KEY for any real deployment or agents "
+                "will break after a restart.")
     else:
-        logger.info("API key authentication: DISABLED (set HBV_API_KEY_REQUIRED=true to enable)")
-        logger.info("Generated API key for reference (set HBV_API_KEY env var to use a fixed key)")
+        logger.warning(
+            "⚠ API key authentication is DISABLED — every telemetry endpoint is "
+            "unauthenticated. Set HBV_API_KEY_REQUIRED=true (the default) to enable.")
 
     # Start background cleanup task
     cleanup = asyncio.create_task(cleanup_task())
@@ -585,15 +675,30 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="HoneyBadger Sentinel Collector",
     description="C2-style infrastructure monitoring collector",
-    version="1.1.0",
-    lifespan=lifespan
+    version="1.1.4",
+    lifespan=lifespan,
+    # Docs/schema routes are OFF by default (review finding S-06). Public
+    # attack surface stays limited to /health and the empty dashboard shell.
+    docs_url="/docs" if CONFIG['enable_docs'] else None,
+    redoc_url="/redoc" if CONFIG['enable_docs'] else None,
+    openapi_url="/openapi.json" if CONFIG['enable_docs'] else None,
 )
 
-# CORS configuration
+# CORS: NEVER combine wildcard origins with credentials. That pairing is both a
+# spec violation (browsers reject it) and, if it were honored, a cross-origin
+# credential leak. Default origins are empty (same-origin dashboard needs none);
+# if an operator opts into "*", credentials are force-disabled with a warning.
+_cors_origins = CONFIG['allowed_origins']
+_cors_wildcard = "*" in _cors_origins
+if _cors_wildcard:
+    logger.warning(
+        "CORS wildcard '*' origins configured; disabling credentialed CORS to "
+        "avoid a spec-invalid, credential-leaking configuration."
+    )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CONFIG['allowed_origins'],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=not _cors_wildcard,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -647,18 +752,40 @@ async def receive_beacon(
     _auth: bool = Depends(verify_api_key),
     _rate: bool = Depends(check_rate_limit)
 ):
-    """Receive beacon from agent."""
+    """Receive beacon from agent.
+
+    Persistence is authoritative: if store_beacon returns False, the handler
+    returns 503 (retryable) and rolls back the replay reservation so an honest
+    retry of the same payload can succeed once storage recovers. See review
+    finding S-03 — the earlier version acknowledged "success" even on a failed
+    write, which permanently lost telemetry during disk/permission trouble.
+    """
+    reserved = False
     try:
+        # Freshness + replay control: reject stale/post-dated timestamps and
+        # verbatim replays before doing any work or touching the database.
+        replay_guard.check(beacon.agent_id, beacon.timestamp)
+        reserved = True
+
         # Convert Pydantic model to dict for storage
         beacon_dict = beacon.model_dump(exclude_none=True)
 
         safe_agent_id = sanitize_for_logging(beacon.agent_id)
-        logger.info(f"Beacon received from {safe_agent_id}")
 
-        # Store beacon
-        db.store_beacon(beacon_dict)
+        # Store beacon — DO NOT log "received" until persistence commits.
+        if not db.store_beacon(beacon_dict):
+            replay_guard.rollback(beacon.agent_id, beacon.timestamp)
+            reserved = False
+            logger.error(f"Beacon from {safe_agent_id} was NOT persisted")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Beacon storage unavailable; retry the beacon"
+            )
 
-        # Check for alerts
+        logger.info(f"Beacon persisted from {safe_agent_id}")
+
+        # Check for alerts (alert-store failures are logged but do not fail
+        # the request — the beacon itself is already durable).
         alerts = alert_engine.check_beacon(beacon_dict)
         if alerts:
             alert_engine.store_alerts(alerts)
@@ -672,6 +799,10 @@ async def receive_beacon(
     except HTTPException:
         raise
     except Exception as e:
+        # Any unexpected exception in the pipeline: roll back the reservation
+        # so the honest retry is not falsely rejected as a duplicate.
+        if reserved:
+            replay_guard.rollback(beacon.agent_id, beacon.timestamp)
         logger.error(f"Error processing beacon: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -679,7 +810,10 @@ async def receive_beacon(
         )
 
 @app.get("/api/agents")
-async def get_agents(_rate: bool = Depends(check_rate_limit)):
+async def get_agents(
+    _auth: bool = Depends(verify_api_key),
+    _rate: bool = Depends(check_rate_limit)
+):
     """Get list of all agents."""
     agents = db.get_active_agents()
     return JSONResponse({"agents": agents})
@@ -688,6 +822,7 @@ async def get_agents(_rate: bool = Depends(check_rate_limit)):
 @app.get("/api/beacons/latest")
 async def get_latest_beacons(
     limit: int = 100,
+    _auth: bool = Depends(verify_api_key),
     _rate: bool = Depends(check_rate_limit)
 ):
     """Get latest beacons across all agents."""
@@ -701,6 +836,7 @@ async def get_latest_beacons(
 async def get_agent_beacons(
     agent_id: str,
     limit: int = 100,
+    _auth: bool = Depends(verify_api_key),
     _rate: bool = Depends(check_rate_limit)
 ):
     """Get beacons for specific agent."""
@@ -720,6 +856,7 @@ async def get_agent_beacons(
 async def get_alerts(
     resolved: bool = False,
     limit: int = 100,
+    _auth: bool = Depends(verify_api_key),
     _rate: bool = Depends(check_rate_limit)
 ):
     """Get recent alerts."""
@@ -741,7 +878,10 @@ async def get_alerts(
 
 
 @app.get("/api/stats", response_model=StatsResponse)
-async def get_stats(_rate: bool = Depends(check_rate_limit)):
+async def get_stats(
+    _auth: bool = Depends(verify_api_key),
+    _rate: bool = Depends(check_rate_limit)
+):
     """Get collector statistics."""
     agents = db.get_active_agents()
 
@@ -779,88 +919,112 @@ async def get_stats(_rate: bool = Depends(check_rate_limit)):
         }
     )
 
-@app.get("/", response_class=HTMLResponse)
-async def root():
-    """Simple dashboard"""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>HoneyBadger Sentinel</title>
-        <style>
-            body {
-                background: #1a1a1a;
-                color: #00ff00;
-                font-family: 'Courier New', monospace;
-                padding: 20px;
-            }
-            h1 { color: #ff0000; }
-            .container { max-width: 1200px; margin: 0 auto; }
-            .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin: 20px 0; }
-            .stat-box { background: #2a2a2a; padding: 20px; border: 2px solid #00ff00; }
-            .stat-value { font-size: 2em; font-weight: bold; }
-            pre { background: #0a0a0a; padding: 15px; border: 1px solid #333; overflow-x: auto; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🦡 HoneyBadger Sentinel Collector</h1>
-            <p>C2-Style Infrastructure Monitoring</p>
-            
-            <div class="stats">
-                <div class="stat-box">
-                    <div>Agents Online</div>
-                    <div class="stat-value" id="agents-online">-</div>
-                </div>
-                <div class="stat-box">
-                    <div>Beacons (Last Hour)</div>
-                    <div class="stat-value" id="beacons-hour">-</div>
-                </div>
-                <div class="stat-box">
-                    <div>Active Alerts</div>
-                    <div class="stat-value" id="alerts">-</div>
-                </div>
-            </div>
-            
-            <h2>API Endpoints</h2>
-            <pre>
-GET  /api/stats              - Collector statistics
-GET  /api/agents             - List all agents
-GET  /api/beacons/latest     - Latest beacons (all agents)
-GET  /api/beacons/{agent_id} - Beacons for specific agent
-GET  /api/alerts             - Recent alerts
-POST /api/beacon             - Receive beacon (agent endpoint)
-            </pre>
-            
-            <h2>Quick Start</h2>
-            <pre>
-# Test the API
-curl http://localhost:8443/api/stats
-curl http://localhost:8443/api/agents
-            </pre>
-        </div>
-        
-        <script>
-            async function updateStats() {
-                try {
-                    const response = await fetch('/api/stats');
-                    const data = await response.json();
-                    
-                    document.getElementById('agents-online').textContent = data.agents.online;
-                    document.getElementById('beacons-hour').textContent = data.beacons.last_hour;
-                    document.getElementById('alerts').textContent = data.alerts.unresolved;
-                } catch (e) {
-                    console.error('Failed to fetch stats:', e);
-                }
-            }
-            
-            // Update stats every 5 seconds
-            updateStats();
-            setInterval(updateStats, 5000);
-        </script>
-    </body>
-    </html>
+def _register_dashboard(_app: FastAPI) -> None:
+    """Register GET / only when HBV_ENABLE_DASHBOARD=true (review R-02).
+
+    When disabled, no route is defined at /, so GET / returns 404 and the
+    route inventory is truly `{"/health"}` — matching the reviewer's
+    health-only public-route criterion. When enabled, the same interactive
+    shell as before is served; operators should place this behind reverse-
+    proxy access control (IP allowlist, mTLS, or a management VLAN).
     """
+    @_app.get("/", response_class=HTMLResponse)
+    async def root():
+        return _DASHBOARD_HTML
+
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html>
+<head>
+    <title>HoneyBadger Sentinel</title>
+    <style>
+        body { background: #1a1a1a; color: #00ff00;
+               font-family: 'Courier New', monospace; padding: 20px; }
+        h1 { color: #ff0000; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin: 20px 0; }
+        .stat-box { background: #2a2a2a; padding: 20px; border: 2px solid #00ff00; }
+        .stat-value { font-size: 2em; font-weight: bold; }
+        pre { background: #0a0a0a; padding: 15px; border: 1px solid #333; overflow-x: auto; }
+        .authbar { background: #2a2a2a; padding: 12px; border: 1px solid #333; margin: 12px 0; }
+        .authbar input { background: #0a0a0a; color: #00ff00; border: 1px solid #00ff00;
+                         font-family: inherit; padding: 6px; width: 320px; }
+        .authbar button { background: #00ff00; color: #0a0a0a; border: none;
+                          font-family: inherit; padding: 6px 12px; cursor: pointer; }
+        #auth-status { color: #ffb020; margin-left: 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🦡 HoneyBadger Sentinel Collector</h1>
+        <p>C2-Style Infrastructure Monitoring</p>
+        <div class="authbar">
+            <label for="api-key">API key:</label>
+            <input type="password" id="api-key" placeholder="paste X-API-Key value" autocomplete="off">
+            <button id="api-key-save" type="button">Use key</button>
+            <span id="auth-status">no key set</span>
+        </div>
+        <div class="stats">
+            <div class="stat-box"><div>Agents Online</div><div class="stat-value" id="agents-online">-</div></div>
+            <div class="stat-box"><div>Beacons (Last Hour)</div><div class="stat-value" id="beacons-hour">-</div></div>
+            <div class="stat-box"><div>Active Alerts</div><div class="stat-value" id="alerts">-</div></div>
+        </div>
+        <h2>API Endpoints</h2>
+        <pre>
+GET  /api/stats              - Collector statistics        (auth required)
+GET  /api/agents             - List all agents             (auth required)
+GET  /api/beacons/latest     - Latest beacons              (auth required)
+GET  /api/beacons/{agent_id} - Beacons for one agent       (auth required)
+GET  /api/alerts             - Recent alerts               (auth required)
+GET  /metrics                - Prometheus metrics          (auth required)
+POST /api/beacon             - Receive beacon (agent)      (auth required)
+GET  /health                 - Liveness probe              (open)
+        </pre>
+    </div>
+    <script>
+        function getKey() { return sessionStorage.getItem('hbv_api_key') || ''; }
+        function setStatus(msg) { document.getElementById('auth-status').textContent = msg; }
+        document.getElementById('api-key-save').addEventListener('click', function () {
+            const v = document.getElementById('api-key').value.trim();
+            if (v) {
+                sessionStorage.setItem('hbv_api_key', v);
+                document.getElementById('api-key').value = '';
+                setStatus('key set for this tab');
+                updateStats();
+            } else {
+                sessionStorage.removeItem('hbv_api_key');
+                setStatus('no key set');
+            }
+        });
+        async function updateStats() {
+            const key = getKey();
+            const headers = key ? { 'X-API-Key': key } : {};
+            try {
+                const response = await fetch('/api/stats', { headers });
+                if (response.status === 401) { setStatus('unauthorized — paste a valid API key'); return; }
+                if (!response.ok) { setStatus('error: HTTP ' + response.status); return; }
+                const data = await response.json();
+                document.getElementById('agents-online').textContent = data.agents.online;
+                document.getElementById('beacons-hour').textContent = data.beacons.last_hour;
+                document.getElementById('alerts').textContent = data.alerts.unresolved;
+                setStatus(key ? 'connected' : 'connected (auth disabled)');
+            } catch (e) {
+                setStatus('fetch failed — is the collector reachable?');
+                console.error('Failed to fetch stats:', e);
+            }
+        }
+        if (getKey()) setStatus('key set for this tab');
+        updateStats();
+        setInterval(updateStats, 5000);
+    </script>
+</body>
+</html>
+"""
+
+
+if CONFIG['enable_dashboard']:
+    _register_dashboard(app)
+
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -868,12 +1032,12 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         timestamp=int(time.time()),
-        version="1.1.0"
+        version="1.1.4"
     )
 
 
 @app.get("/metrics")
-async def prometheus_metrics():
+async def prometheus_metrics(_auth: bool = Depends(verify_api_key)):
     """Prometheus-compatible metrics endpoint."""
     agents = db.get_active_agents()
     online_count = sum(1 for a in agents if a['status'] == 'online')
@@ -930,7 +1094,7 @@ hbv_rate_limiter_clients {len(rate_limiter.requests)}
 
 # HELP hbv_info Collector version information
 # TYPE hbv_info gauge
-hbv_info{{version="1.1.0"}} 1
+hbv_info{{version="1.1.4"}} 1
 """
 
     return PlainTextResponse(
@@ -946,7 +1110,7 @@ hbv_info{{version="1.1.0"}} 1
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description='HoneyBadger Sentinel Collector v1.1.0')
+    parser = argparse.ArgumentParser(description='HoneyBadger Sentinel Collector v1.1.4')
     parser.add_argument('--host', default=CONFIG['host'], help='Host to bind to')
     parser.add_argument('--port', type=int, default=CONFIG['port'], help='Port to bind to')
     parser.add_argument('--generate-key', action='store_true', help='Generate a new API key and exit')

@@ -8,11 +8,24 @@
 
 .NOTES
     Author: HoneyBadger
-    Version: 1.1.0
+    Version: 1.1.4
     CyberShield 2026 - Infrastructure Monitoring
 #>
 
 #Requires -Version 7.0
+
+# NOTE: `param()` MUST be the first executable statement in a PowerShell
+# script (only #Requires directives and comments may precede it). Earlier
+# versions had this block at the bottom near the entry point, which is a
+# latent parse bug — none of the -Install / -Uninstall / -Test / -RunAgent
+# switches were actually bound and every invocation fell through to the
+# usage banner. Now fixed.
+param(
+    [switch]$RunAgent,
+    [switch]$Install,
+    [switch]$Uninstall,
+    [switch]$Test
+)
 
 # ═══════════════════════════════════════════════════════════════════════
 # CONFIGURATION (with environment variable support)
@@ -57,9 +70,20 @@ $script:Config = @{
     AgentID = Get-EnvOrDefault -Name "HBV_AGENT_ID" -Default $env:COMPUTERNAME
     AgentType = "windows"
 
-    # Collector Configuration
-    APIEndpoint = Get-EnvOrDefault -Name "HBV_COLLECTOR_URL" -Default "http://<COLLECTOR_IP>:8443/api/beacon"
+    # Collector Configuration. HTTPS by default: the beacon carries the API key
+    # and full host telemetry — cleartext is a credential and fingerprint leak
+    # on the wire. Plain http:// is rejected unless HBV_ALLOW_INSECURE=true is
+    # set (documented for lab/loopback only). Mirrors the Linux agent policy
+    # exactly to satisfy review finding S-01.
+    APIEndpoint = Get-EnvOrDefault -Name "HBV_COLLECTOR_URL" -Default "https://<COLLECTOR_HOST>:8443/api/beacon"
     APIKey = Get-EnvOrDefault -Name "HBV_API_KEY" -Default ""
+    AllowInsecure = Get-EnvBoolOrDefault -Name "HBV_ALLOW_INSECURE" -Default $false
+    # TLS trust: leave TLSCaBundle empty to use the Windows machine trust
+    # store; set to the literal string "false" to disable verification (lab
+    # only, logs a warning). For a private CA in production, import the CA
+    # certificate into the Windows Local Machine "Trusted Root Certification
+    # Authorities" store — PowerShell 7's Invoke-RestMethod will honor it.
+    TLSCaBundle = Get-EnvOrDefault -Name "HBV_TLS_CA_BUNDLE" -Default ""
 
     # Beacon Settings
     BeaconInterval = Get-EnvIntOrDefault -Name "HBV_BEACON_INTERVAL" -Default 30
@@ -292,31 +316,83 @@ function Send-QueuedBeacons {
 # BEACON TRANSMISSION
 # ═══════════════════════════════════════════════════════════════════════
 
+function Test-TransportPolicy {
+    <#
+    .SYNOPSIS
+        Enforce the same transport policy as the Linux agent.
+    .DESCRIPTION
+        Returns $true if the configured endpoint is allowed to send; $false
+        if it should be refused (cleartext without the explicit override).
+        Emits log lines for warnings so the operator sees the reason.
+    #>
+    param([string]$Endpoint)
+
+    $lower = $Endpoint.ToLowerInvariant()
+
+    if ($lower.StartsWith("http://")) {
+        if (-not $script:Config.AllowInsecure) {
+            Write-SentinelLog ("Refusing to send beacon over plaintext HTTP ({0}). " +
+                "Set HBV_COLLECTOR_URL to https://... or, for a lab-only override, " +
+                "HBV_ALLOW_INSECURE=true." -f $Endpoint) -Level "ERROR"
+            return $false
+        }
+        Write-SentinelLog ("Sending beacon over plaintext HTTP because HBV_ALLOW_INSECURE=true - " +
+            "credentials and host telemetry are on the wire in the clear.") -Level "WARN"
+        return $true
+    }
+
+    if (-not $lower.StartsWith("https://")) {
+        Write-SentinelLog ("HBV_COLLECTOR_URL must start with http:// or https:// (got {0})" -f $Endpoint) -Level "ERROR"
+        return $false
+    }
+
+    return $true
+}
+
 function Send-BeaconHTTP {
     param([hashtable]$Metrics)
+
+    if (-not (Test-TransportPolicy -Endpoint $script:Config.APIEndpoint)) {
+        return $false
+    }
 
     $retryCount = 0
     $headers = @{
         "Content-Type" = "application/json"
     }
 
-    # Add API key if configured
+    # Add API key if configured (the collector requires it by default).
     if ($script:Config.APIKey) {
         $headers["X-API-Key"] = $script:Config.APIKey
+    }
+
+    # TLS verify: the string "false" (case-insensitive) disables verification,
+    # matching the Linux HBV_TLS_CA_BUNDLE=false lab override. Any other value
+    # (empty or a path) keeps PowerShell 7's default trust-store verification.
+    $skipCert = ($script:Config.TLSCaBundle.Trim().ToLowerInvariant() -eq "false")
+    if ($skipCert) {
+        Write-SentinelLog "TLS verification DISABLED via HBV_TLS_CA_BUNDLE=false - lab use only" -Level "WARN"
     }
 
     while ($retryCount -lt $script:Config.MaxRetries) {
         try {
             $json = $Metrics | ConvertTo-Json -Depth 10 -Compress
 
-            $response = Invoke-RestMethod -Uri $script:Config.APIEndpoint `
-                                         -Method POST `
-                                         -Body $json `
-                                         -Headers $headers `
-                                         -TimeoutSec $script:Config.RequestTimeout `
-                                         -ErrorAction Stop
+            $invokeArgs = @{
+                Uri         = $script:Config.APIEndpoint
+                Method      = 'POST'
+                Body        = $json
+                Headers     = $headers
+                TimeoutSec  = $script:Config.RequestTimeout
+                ErrorAction = 'Stop'
+            }
+            if ($skipCert) {
+                $invokeArgs['SkipCertificateCheck'] = $true
+            }
 
-            Write-SentinelLog "Beacon transmitted successfully via HTTP" -Level "DEBUG"
+            $response = Invoke-RestMethod @invokeArgs
+
+            Write-SentinelLog "Beacon transmitted successfully" -Level "DEBUG"
             return $true
 
         } catch {
@@ -330,6 +406,10 @@ function Send-BeaconHTTP {
                 Write-SentinelLog "Rate limited by collector, will retry later" -Level "WARN"
                 return $false
             }
+            elseif ($statusCode -eq 503) {
+                Write-SentinelLog "Collector reported persistence unavailable (503), will retry" -Level "WARN"
+                # Fall through to retry-with-backoff — beacon will not be lost.
+            }
 
             $retryCount++
             Write-SentinelLog "HTTP beacon failed (attempt $retryCount/$($script:Config.MaxRetries)): $($_.Exception.Message)" -Level "WARN"
@@ -340,7 +420,7 @@ function Send-BeaconHTTP {
         }
     }
 
-    Write-SentinelLog "All HTTP beacon attempts failed" -Level "ERROR"
+    Write-SentinelLog "All beacon attempts failed" -Level "ERROR"
     return $false
 }
 
@@ -370,7 +450,7 @@ function Start-SentinelAgent {
     Write-Host "╚═══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
 
-    Write-SentinelLog "HoneyBadger Sentinel Agent v1.1.0" -Level "INFO"
+    Write-SentinelLog "HoneyBadger Sentinel Agent v1.1.4" -Level "INFO"
     Write-SentinelLog "Agent ID: $($script:Config.AgentID)" -Level "INFO"
     Write-SentinelLog "Collector: $($script:Config.APIEndpoint)" -Level "INFO"
     Write-SentinelLog "Beacon Interval: $($script:Config.BeaconInterval)s" -Level "INFO"
@@ -501,16 +581,14 @@ function Uninstall-SentinelService {
 }
 
 # ═══════════════════════════════════════════════════════════════════════
-# ENTRY POINT
+# ENTRY POINT (param() block is at the top of the file — see the note there)
 # ═══════════════════════════════════════════════════════════════════════
 
-# Command-line parameters
-param(
-    [switch]$RunAgent,
-    [switch]$Install,
-    [switch]$Uninstall,
-    [switch]$Test
-)
+# When this script is dot-sourced from the Pester test suite (which imports
+# the functions and CONFIG for behaviour tests), $MyInvocation.InvocationName
+# is '.' — in that case, skip the interactive entry-point dispatch below so
+# the dot-source doesn't accidentally launch the agent or print the banner.
+if ($MyInvocation.InvocationName -eq '.') { return }
 
 if ($Install) {
     Install-SentinelService
@@ -530,7 +608,7 @@ elseif ($RunAgent) {
 else {
     Write-Host ""
     Write-Host "╔═══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║  🦡 HoneyBadger Sentinel Agent v1.1.0                    ║" -ForegroundColor Cyan
+    Write-Host "║  🦡 HoneyBadger Sentinel Agent v1.1.4                    ║" -ForegroundColor Cyan
     Write-Host "╚═══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Usage:" -ForegroundColor Yellow
@@ -540,8 +618,10 @@ else {
     Write-Host "  .\Sentinel-Agent-Windows.ps1 -Test          # Test metrics collection" -ForegroundColor Gray
     Write-Host ""
     Write-Host "Environment Variables:" -ForegroundColor Yellow
-    Write-Host "  HBV_COLLECTOR_URL    - Collector endpoint URL" -ForegroundColor Gray
-    Write-Host "  HBV_API_KEY          - API key for authentication" -ForegroundColor Gray
+    Write-Host "  HBV_COLLECTOR_URL    - Collector endpoint URL (https:// required by default)" -ForegroundColor Gray
+    Write-Host "  HBV_API_KEY          - API key (REQUIRED unless collector opts out)" -ForegroundColor Gray
+    Write-Host "  HBV_ALLOW_INSECURE   - Set to true to allow http:// (LAB ONLY, default false)" -ForegroundColor Gray
+    Write-Host "  HBV_TLS_CA_BUNDLE    - Set to 'false' to skip TLS verify (LAB ONLY)" -ForegroundColor Gray
     Write-Host "  HBV_BEACON_INTERVAL  - Beacon interval in seconds (default: 30)" -ForegroundColor Gray
     Write-Host "  HBV_LOG_LEVEL        - Logging level (DEBUG/INFO/WARN/ERROR)" -ForegroundColor Gray
     Write-Host ""
